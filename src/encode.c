@@ -4572,17 +4572,52 @@ encode_preR13_section (const Dwg_Section_Type_r11 id, Bit_Chain *restrict dat,
     case SECTION_BLOCK:
       write_sentinel (dat, DWG_SENTINEL_R11_BLOCK_BEGIN);
       PREP_CTRL (BLOCK_CONTROL)
-      for (i = 0; i < tblnum; i++)
-        {
-          PREP_TABLE (BLOCK_HEADER);
-          if (_obj->name && strEQc (_obj->name, "*MODEL_SPACE"))
+      {
+        Dwg_Object_BLOCK_CONTROL *_bctrl
+            = ctrl ? ctrl->tio.object->tio.BLOCK_CONTROL : NULL;
+        for (i = 0; i < tblnum; i++)
+          {
+            size_t size_adr = dat->byte;
+            Dwg_Object *obj = NULL;
+            Dwg_Object_BLOCK_HEADER *_obj;
+            // use entries[] directly to get the right BLOCK_HEADER per index
+            if (_bctrl && i < (int)_bctrl->num_entries && _bctrl->entries[i])
+              obj = dwg_ref_object (dwg, _bctrl->entries[i]);
+            if (!obj)
+              obj = dwg_get_next_object (dwg, DWG_TYPE_BLOCK_HEADER, num + i);
+            if (!obj)
+              {
+                LOG_ERROR ("No BLOCK_HEADER at entries[%d]", i);
+                continue;
+              }
+            _obj = obj->tio.object->tio.BLOCK_HEADER;
+            LOG_TRACE ("contents table BLOCK_HEADER [%d]: (0x%zx, 0x%zx)\n", i,
+                       obj->address, dat->byte);
+            if (obj->fixedtype != DWG_TYPE_BLOCK_HEADER)
+              {
+                LOG_ERROR ("Wrong type %s at [%d], expected BLOCK_HEADER",
+                           dwg_type_name (obj->fixedtype), i);
+                continue;
+              }
+            if (_obj->name && strEQc (_obj->name, "*MODEL_SPACE"))
+              {
+                LOG_TRACE ("Skip *MODEL_SPACE\n");
+                continue;
+              }
+            // record where this entry starts so block_offset_r11 can be
+            // patched
+            obj->address = size_adr;
+            // ensure obj->size is set so FIELD_RC(unknown_r11) is skipped
+            if (!obj->size)
+              obj->size = tbl->size;
+            error |= dwg_encode_BLOCK_HEADER (dat, obj);
+            dwg->cur_index += tblnum;
+            SINCE (R_11)
             {
-              LOG_TRACE ("Skip *MODEL_SPACE\n");
-              continue;
+              bit_write_CRC (dat, size_adr, 0xC0C1);
             }
-          error |= dwg_encode_BLOCK_HEADER (dat, obj);
-          CHK_ENDPOS;
-        }
+          }
+      }
       write_sentinel (dat, DWG_SENTINEL_R11_BLOCK_END);
       break;
 
@@ -4994,7 +5029,61 @@ encode_preR13_entities (EntitySectionIndexR11 section, Bit_Chain *restrict dat,
                   continue;
                 }
               else
-                in_blocks = true;
+                {
+                  in_blocks = true;
+                  // patch block_offset_r11 in already-written BLOCK_HEADER
+                  // entry. obj->address was set to size_adr during table
+                  // encode. R11 layout: flag(1) + name(32) + used(2) = 35
+                  // bytes offset.
+                  if (obj->tio.entity->ownerhandle)
+                    {
+                      Dwg_Object *_hdr_obj
+                          = dwg_ref_object (dwg, obj->tio.entity->ownerhandle);
+                      if (_hdr_obj
+                          && _hdr_obj->fixedtype == DWG_TYPE_BLOCK_HEADER
+                          && _hdr_obj->address)
+                        {
+                          Dwg_Object_BLOCK_HEADER *_bhdr
+                              = _hdr_obj->tio.object->tio.BLOCK_HEADER;
+                          BITCODE_RL off
+                              = (dat->byte - dwg->header.blocks_start)
+                                & 0xFFFFFFFF;
+                          if (dat->version > R_2_22)
+                            off |= 0x40000000;
+                          _bhdr->block_offset_r11 = off;
+                          // patch the already-written RL field at offset 35
+                          size_t patch_pos = _hdr_obj->address + 35;
+                          size_t entry_sz
+                              = _hdr_obj->size
+                                    ? _hdr_obj->size
+                                    : dwg->header.section[SECTION_BLOCK].size;
+                          if (patch_pos + 4 <= dat->size)
+                            {
+                              size_t saved = dat->byte;
+                              dat->byte = patch_pos;
+                              bit_write_RL (dat, off);
+                              LOG_TRACE (
+                                  "BLOCK_HEADER(%s).block_offset_r11 = 0x%x"
+                                  " (patched @0x%zx)\n",
+                                  _bhdr->name, off, patch_pos);
+                              // re-write CRC of this entry (last 2 bytes)
+                              if (entry_sz >= 2
+                                  && _hdr_obj->address + entry_sz <= dat->size)
+                                {
+                                  dat->byte = _hdr_obj->address + entry_sz - 2;
+                                  BITCODE_RS crc = bit_calc_CRC (
+                                      0xC0C1, &dat->chain[_hdr_obj->address],
+                                      entry_sz - 2);
+                                  bit_write_RS (dat, crc);
+                                  LOG_TRACE ("BLOCK_HEADER entry CRC patched:"
+                                             " %04X\n",
+                                             crc);
+                                }
+                              dat->byte = saved;
+                            }
+                        }
+                    }
+                }
             }
           if (!in_blocks)
             {

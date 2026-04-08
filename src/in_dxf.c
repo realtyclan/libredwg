@@ -7261,7 +7261,8 @@ do_return:
   if (!obj->handle.value)
     {
       BITCODE_RLL next_handle = dwg_next_handle (dwg);
-      dwg_add_handle (&obj->handle, 0, next_handle, NULL);
+      // pass obj so object_map is populated for dwg_resolve_handle later
+      dwg_add_handle (&obj->handle, 0, next_handle, obj);
       // adds header_vars->CONTROL ref
       (void)dwg_ctrl_table (dwg, name);
       LOG_TRACE ("%s.handle = (0.%d." FORMAT_HV ")\n", obj->name,
@@ -13112,7 +13113,9 @@ dxf_tables_read (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
               if (!obj->handle.value)
                 {
                   BITCODE_RLL next_handle = dwg_next_handle (dwg);
-                  dwg_add_handle (&obj->handle, 0, next_handle, NULL);
+                  // pass obj so object_map is populated for dwg_resolve_handle
+                  // later
+                  dwg_add_handle (&obj->handle, 0, next_handle, obj);
                   // ref = dwg_add_handleref (dwg, 3, next_handle, ctrl);
                   LOG_TRACE ("%s.handle = (0.%d." FORMAT_HV ")\n", obj->name,
                              obj->handle.size, obj->handle.value);
@@ -13149,7 +13152,7 @@ dxf_tables_read (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
                              < 0)
                       {
                         ref = dwg_add_handleref (dwg, 2, obj->handle.value,
-                                                 NULL);
+                                                 obj);
                         PUSH_HV (_ctrl, num_entries, entries, ref);
                       }
                   }
@@ -13197,7 +13200,7 @@ dxf_tables_read (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
                              < 0)
                       {
                         ref = dwg_add_handleref (dwg, 2, obj->handle.value,
-                                                 NULL);
+                                                 obj);
                         PUSH_HV (_ctrl, num_entries, entries, ref);
                       }
                     if (dwg->header.from_version > R_2004 && _obj->name
@@ -13228,7 +13231,7 @@ dxf_tables_read (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
                         < 0)
                       {
                         ref = dwg_add_handleref (dwg, 2, obj->handle.value,
-                                                 NULL);
+                                                 obj);
                         PUSH_HV (_ctrl, num_entries, entries, ref);
                       }
                   }
@@ -13253,7 +13256,7 @@ dxf_tables_read (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
             if (!ctrl->handle.value)
               {
                 BITCODE_RLL next_handle = dwg_next_handle (dwg);
-                dwg_add_handle (&ctrl->handle, 0, next_handle, NULL);
+                dwg_add_handle (&ctrl->handle, 0, next_handle, ctrl);
                 // adds header_vars->CONTROL ref
                 (void)dwg_ctrl_table (dwg, table);
                 // ref = dwg_add_handleref (dwg, 3, next_handle, ctrl);
@@ -13345,9 +13348,36 @@ dxf_blocks_read (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
               if (idx && !obj->handle.value)
                 {
                   BITCODE_RLL next_handle = dwg_next_handle (dwg);
-                  dwg_add_handle (&obj->handle, 0, next_handle, NULL);
+                  dwg_add_handle (&obj->handle, 0, next_handle, obj);
                   LOG_TRACE ("%s.handle = (0.%d." FORMAT_HV ")\n", obj->name,
                              obj->handle.size, obj->handle.value);
+                  // R11: fixup BLOCK_HEADER.block_entity after handle is known
+                  if (dat->from_version <= R_12 && obj->type == DWG_TYPE_BLOCK
+                      && obj->tio.entity->ownerhandle)
+                    {
+                      Dwg_Object *_blkhdr
+                          = dwg_ref_object (dwg, obj->tio.entity->ownerhandle);
+                      if (_blkhdr
+                          && _blkhdr->fixedtype == DWG_TYPE_BLOCK_HEADER)
+                        {
+                          Dwg_Object_BLOCK_HEADER *_hdr
+                              = _blkhdr->tio.object->tio.BLOCK_HEADER;
+                          Dwg_Entity_BLOCK *_blkent
+                              = obj->tio.entity->tio.BLOCK;
+                          if (!_hdr->block_entity
+                              || !_hdr->block_entity->absolute_ref)
+                            {
+                              _hdr->block_entity = dwg_add_handleref (
+                                  dwg, 3, obj->handle.value, _blkhdr);
+                              LOG_TRACE (
+                                  "BLOCK_HEADER(%s).block_entity = " FORMAT_REF
+                                  " [H] (r11 fixup)\n",
+                                  _hdr->name, ARGS_REF (_hdr->block_entity));
+                            }
+                          _hdr->base_pt.x = _blkent->base_pt.x;
+                          _hdr->base_pt.y = _blkent->base_pt.y;
+                        }
+                    }
                 }
               pair = new_object (name, dxfname, dat, dwg, 0, &i);
               obj = &dwg->object[idx];
@@ -13406,6 +13436,25 @@ dxf_blocks_read (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
                                   " [H] (blocks)\n",
                                   ARGS_REF (_ctrl->paper_space));
                             }
+                        }
+                    }
+                  else if (dat->from_version <= R_12 && _obj && _obj->name)
+                    {
+                      // R11/R12: no ownerhandle on BLOCK entities.
+                      // Find or create the BLOCK_HEADER by name.
+                      if (bit_eq_T (dat, _obj->name, "*Model_Space")
+                          || bit_eq_T (dat, _obj->name, "*MODEL_SPACE"))
+                        blkhdr = &dwg->object[0]; // pre-created at startup
+                      if (blkhdr)
+                        {
+                          Dwg_Object_BLOCK_HEADER *_hdr
+                              = blkhdr->tio.object->tio.BLOCK_HEADER;
+                          ent->ownerhandle = dwg_add_handleref (
+                              dwg, 4, blkhdr->handle.value, NULL);
+                          // block_entity deferred: handle not yet assigned
+                          // (set in next iteration's "complete old obj")
+                          _hdr->base_pt.x = _obj->base_pt.x;
+                          _hdr->base_pt.y = _obj->base_pt.y;
                         }
                     }
                   else
@@ -13508,7 +13557,7 @@ dxf_blocks_read (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
   if (dwg->num_objects && !obj->handle.value)
     {
       BITCODE_RLL next_handle = dwg_next_handle (dwg);
-      dwg_add_handle (&obj->handle, 0, next_handle, NULL);
+      dwg_add_handle (&obj->handle, 0, next_handle, obj);
       LOG_TRACE ("%s.handle = (0.%d." FORMAT_HV ")\n", obj->name,
                  obj->handle.size, obj->handle.value);
     }
@@ -13587,7 +13636,7 @@ dxf_entities_read (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
               if (!obj->handle.value)
                 {
                   BITCODE_RLL next_handle = dwg_next_handle (dwg);
-                  dwg_add_handle (&obj->handle, 0, next_handle, NULL);
+                  dwg_add_handle (&obj->handle, 0, next_handle, obj);
                   LOG_TRACE ("%s.handle = (0.%d." FORMAT_HV ")\n", obj->name,
                              obj->handle.size, obj->handle.value);
                 }
@@ -13640,7 +13689,7 @@ dxf_entities_read (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
           if (!obj->handle.value)
             {
               BITCODE_RLL next_handle = dwg_next_handle (dwg);
-              dwg_add_handle (&obj->handle, 0, next_handle, NULL);
+              dwg_add_handle (&obj->handle, 0, next_handle, obj);
               LOG_TRACE ("%s.handle = (0.%d." FORMAT_HV ")\n", obj->name,
                          obj->handle.size, obj->handle.value);
             }
@@ -13952,7 +14001,11 @@ resolve_postponed_object_refs (Dwg_Data *restrict dwg)
         {
           Dwg_Object_APPID *_obj = obj->tio.object->tio.APPID;
           if (hdl->handleref.code != 5)
-            hdl = dwg_add_handleref (dwg, 5, hdl->absolute_ref, NULL);
+            {
+              BITCODE_RSd saved_r11_idx = hdl->r11_idx;
+              hdl = dwg_add_handleref (dwg, 5, hdl->absolute_ref, NULL);
+              hdl->r11_idx = saved_r11_idx; // preserve table index for pre-R13
+            }
           if (p.code > 0)
             dwg_dynapi_common_set_value (_obj, field, &hdl, 0);
           else
@@ -14206,6 +14259,42 @@ dwg_read_dxf (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
               BITCODE_H hdl;
               dxf_free_pair (pair);
               pair = NULL;
+              // R11/R12 DXF has no BLOCK_RECORD table. Create BLOCK_CONTROL
+              // with handle 1 before tables are read, since it is the expected
+              // ownerhandle of the model-space BLOCK_HEADER added at startup.
+              if (dwg->header.from_version <= R_12
+                  && !dwg->header_vars.BLOCK_CONTROL_OBJECT)
+                {
+                  Dwg_Object *obj;
+                  Dwg_Object_LTYPE_CONTROL *_obj = NULL;
+                  char *dxfname = strdup ((char *)"BLOCK_CONTROL");
+                  Dwg_Object_BLOCK_CONTROL *_bctrl;
+                  Dwg_Object *mspace;
+                  BITCODE_H ref;
+                  NEW_OBJECT (dwg, obj);
+                  ADD_OBJECT1 (BLOCK_CONTROL, LTYPE_CONTROL);
+                  obj->tio.object->is_xdic_missing = 1;
+                  dwg_add_handle (&obj->handle, 0, 1, obj);
+                  LOG_TRACE ("BLOCK_CONTROL.handle = (0.%d." FORMAT_HV ")\n",
+                             obj->handle.size, obj->handle.value);
+                  dwg->header_vars.BLOCK_CONTROL_OBJECT
+                      = dwg_add_handleref (dwg, 3, 1, obj);
+                  LOG_TRACE ("HEADER.BLOCK_CONTROL_OBJECT = " FORMAT_REF "\n",
+                             ARGS_REF (dwg->header_vars.BLOCK_CONTROL_OBJECT));
+                  // Register the initial *Model_Space BLOCK_HEADER (object[0])
+                  // as model_space (not in entries[] — only user blocks go
+                  // there)
+                  _bctrl = obj->tio.object->tio.BLOCK_CONTROL;
+                  mspace = &dwg->object[0];
+                  _bctrl->model_space
+                      = dwg_add_handleref (dwg, 3, mspace->handle.value, obj);
+                  dwg->header_vars.BLOCK_RECORD_MSPACE = _bctrl->model_space;
+                  LOG_TRACE ("BLOCK_CONTROL.model_space = " FORMAT_REF "\n",
+                             ARGS_REF (_bctrl->model_space));
+                  // Fix up ownerhandle of initial BLOCK_HEADER → BLOCK_CONTROL
+                  mspace->tio.object->ownerhandle
+                      = dwg_add_handleref (dwg, 4, 1, NULL);
+                }
               error = dxf_tables_read (dat, dwg);
               if (error > DWG_ERR_CRITICAL)
                 goto error;

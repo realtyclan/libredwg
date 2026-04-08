@@ -2862,6 +2862,14 @@ dwg_handle_name (Dwg_Data *restrict dwg, const char *restrict table,
         return NULL;
     }
   loglevel = dwg->opts & DWG_OPTS_LOGLEVEL;
+  // R11 special LTYPE sentinels: 32767=BYLAYER, 32766=BYBLOCK
+  if (dwg->header.from_version <= R_12 && strEQc (table, "LTYPE"))
+    {
+      if (handle->r11_idx == 32767)
+        return strdup ("BYLAYER");
+      else if (handle->r11_idx == 32766)
+        return strdup ("BYBLOCK");
+    }
   // look for the _CONTROL table, and search for name in all entries
   ctrl = dwg_ctrl_table (dwg, table);
   if (!ctrl)
