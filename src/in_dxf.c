@@ -2285,10 +2285,9 @@ add_LTYPE_dashes (Dwg_Object *restrict obj, Bit_Chain *restrict dat,
   Dwg_Object_LTYPE *o = obj->tio.object->tio.LTYPE;
   Dwg_Data *dwg = obj->parent;
   int num_dashes = (int)o->numdashes;
-  int is_tu = 0;
+  const int is_tu = obj->parent->header.version >= R_2007;
 
-  o->dashes
-      = (Dwg_LTYPE_dash *)xcalloc (o->numdashes, sizeof (Dwg_LTYPE_dash));
+  o->dashes = (Dwg_LTYPE_dash *)xcalloc (num_dashes, sizeof (Dwg_LTYPE_dash));
   if (!o->dashes)
     {
       o->numdashes = 0;
@@ -2369,8 +2368,18 @@ add_LTYPE_dashes (Dwg_Object *restrict obj, Bit_Chain *restrict dat,
       else if (pair->code == 9)
         {
           static unsigned dash_i = 0;
-          is_tu = obj->parent->header.version >= R_2007;
+          const int max_text_len = is_tu ? 512 : 256;
+          const size_t text_len = strlen (pair->value.s.ptr);
           CHK_dashes (j, dashes);
+          if (text_len > (size_t)max_text_len)
+            {
+              LOG_ERROR (
+                  "Invalid LTYPE.dashes[%d].text truncated from %zu to %d", j,
+                  text_len, max_text_len);
+              pair->value.s.ptr[max_text_len] = '\0';
+              if (is_tu)
+                pair->value.s.ptr[max_text_len - 1] = '\0';
+            }
           o->dashes[j].text
               = dwg_add_u8_input (obj->parent, pair->value.s.ptr);
           LOG_TRACE ("LTYPE.dashes[%d].text = %s [T 9]\n", j,
@@ -2382,12 +2391,16 @@ add_LTYPE_dashes (Dwg_Object *restrict obj, Bit_Chain *restrict dat,
             {
               bit_wcs2cpy ((BITCODE_TU)&o->strings_area[dash_i],
                            (BITCODE_TU)o->dashes[j].text);
-              dash_i += ((strlen (pair->value.s.ptr) * 2) & UINT_MAX) + 2;
+              dash_i += ((text_len * 2) & UINT_MAX) + 2;
+              if (dash_i > 256)
+                dash_i = 0;
             }
           else
             {
               strcpy ((char *)&o->strings_area[dash_i], o->dashes[j].text);
-              dash_i += (strlen (pair->value.s.ptr) & UINT_MAX) + 1;
+              dash_i += (text_len & UINT_MAX) + 1;
+              if (dash_i > 256)
+                dash_i = 0;
             }
         }
       else
